@@ -1,11 +1,11 @@
+use crate::models::{CreatePlanEvent, PlanEvent};
 use axum::{
-    extract::{Path, State, Query},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
-use sqlx::SqlitePool;
-use crate::models::{PlanEvent, CreatePlanEvent};
 use serde::Deserialize;
+use sqlx::SqlitePool;
 
 #[derive(Deserialize)]
 pub struct EventFilter {
@@ -21,7 +21,7 @@ pub async fn list_events(
         // filter by range: event overlaps with [start, end]
         // event.end_at >= start AND event.start_at <= end
         sqlx::query_as::<_, PlanEvent>(
-            "SELECT * FROM plan_events WHERE end_at >= ? AND start_at <= ? ORDER BY start_at ASC"
+            "SELECT * FROM plan_events WHERE end_at >= ? AND start_at <= ? ORDER BY start_at ASC",
         )
         .bind(start)
         .bind(end)

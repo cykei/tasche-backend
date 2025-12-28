@@ -1,10 +1,10 @@
+use crate::models::{CreateProject, Project};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
     Json,
 };
 use sqlx::SqlitePool;
-use crate::models::{Project, CreateProject};
 
 pub async fn list_projects(
     State(pool): State<SqlitePool>,

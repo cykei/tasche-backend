@@ -1,6 +1,6 @@
+use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Type};
-use chrono::NaiveDateTime;
 
 #[derive(Debug, Serialize, Deserialize, FromRow)]
 pub struct Todo {
@@ -11,6 +11,9 @@ pub struct Todo {
     pub date: String, // YYYY-MM-DD
     pub created_at: NaiveDateTime,
     pub updated_at: NaiveDateTime,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -27,6 +30,7 @@ pub struct UpdateTodo {
     pub content: Option<String>,
     pub is_done: Option<bool>,
     pub date: Option<String>,
+    pub tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, FromRow)]
