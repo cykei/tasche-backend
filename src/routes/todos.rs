@@ -5,30 +5,58 @@ use axum::{
     Json,
 };
 use serde::Deserialize;
-use sqlx::{Row, Sqlite, SqlitePool, Transaction};
+use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool, Transaction};
 use std::collections::HashMap;
 
 #[derive(Deserialize)]
 pub struct FilterOptions {
     pub date: Option<String>,
+    pub tags: Option<String>,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
 }
 
 pub async fn list_todos(
     State(pool): State<SqlitePool>,
     Query(opts): Query<FilterOptions>,
 ) -> Result<Json<Vec<Todo>>, StatusCode> {
-    let todos = if let Some(date) = opts.date {
-        sqlx::query_as::<_, Todo>("SELECT * FROM todos WHERE date = ? ORDER BY id DESC")
-            .bind(date)
-            .fetch_all(&pool)
-            .await
-    } else {
-        sqlx::query_as::<_, Todo>("SELECT * FROM todos ORDER BY date DESC, id DESC LIMIT 100")
-            .fetch_all(&pool)
-            .await
-    };
+    let filter_tags = opts
+        .tags
+        .map(parse_filter_tags)
+        .unwrap_or_default();
 
-    match todos {
+    let mut query_builder = QueryBuilder::new("SELECT t.* FROM todos t ");
+
+    if !filter_tags.is_empty() {
+        query_builder.push("JOIN (SELECT tt.todo_id FROM todo_tags tt INNER JOIN tags tg ON tg.id = tt.tag_id WHERE tg.name IN (");
+        let mut separated = query_builder.separated(", ");
+        for tag in &filter_tags {
+            separated.push_bind(tag);
+        }
+        query_builder.push(") GROUP BY tt.todo_id HAVING COUNT(DISTINCT tg.name) = ");
+        query_builder.push_bind(filter_tags.len() as i64);
+        query_builder.push(") tag_filter ON tag_filter.todo_id = t.id ");
+    }
+
+    let mut has_where = false;
+    if let Some(ref date) = opts.date {
+        push_where_clause(&mut query_builder, &mut has_where, "t.date = ", date.clone());
+    }
+
+    if let Some(ref start) = opts.start_date {
+        push_where_clause(&mut query_builder, &mut has_where, "t.date >= ", start.clone());
+    }
+
+    if let Some(ref end) = opts.end_date {
+        push_where_clause(&mut query_builder, &mut has_where, "t.date <= ", end.clone());
+    }
+
+    query_builder.push(" ORDER BY t.date DESC, t.id DESC ");
+    query_builder.push("LIMIT 100");
+
+    let query = query_builder.build_query_as::<Todo>();
+
+    match query.fetch_all(&pool).await {
         Ok(mut list) => {
             attach_tags_to_todos(&pool, &mut list).await?;
             Ok(Json(list))
@@ -151,29 +179,108 @@ fn normalize_tags(input: Vec<String>) -> Vec<String> {
         .collect()
 }
 
+fn parse_filter_tags(raw: String) -> Vec<String> {
+    raw.split(',')
+        .map(|tag| tag.trim().to_string())
+        .filter(|tag| !tag.is_empty())
+        .collect()
+}
+
+fn push_where_clause(
+    builder: &mut QueryBuilder<'_, Sqlite>,
+    has_where: &mut bool,
+    clause: &str,
+    value: String,
+) {
+    if *has_where {
+        builder.push(" AND ");
+    } else {
+        builder.push("WHERE ");
+        *has_where = true;
+    }
+    builder.push(clause);
+    builder.push_bind(value);
+}
+
+pub async fn delete_todo_tag(
+    State(pool): State<SqlitePool>,
+    Path((todo_id, tag_name)): Path<(i64, String)>,
+) -> Result<StatusCode, StatusCode> {
+    let normalized = tag_name.trim();
+    if normalized.is_empty() {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let tag_id: Option<i64> = sqlx::query_scalar("SELECT id FROM tags WHERE name = ?")
+        .bind(normalized)
+        .fetch_optional(tx.as_mut())
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if let Some(tag_id) = tag_id {
+        sqlx::query("DELETE FROM todo_tags WHERE todo_id = ? AND tag_id = ?")
+            .bind(todo_id)
+            .bind(tag_id)
+            .execute(tx.as_mut())
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let count: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) as count FROM todo_tags WHERE tag_id = ?",
+        )
+        .bind(tag_id)
+        .fetch_one(tx.as_mut())
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        if count.0 == 0 {
+            sqlx::query("DELETE FROM tags WHERE id = ?")
+                .bind(tag_id)
+                .execute(tx.as_mut())
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        }
+    }
+
+    tx.commit()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn link_tags(
     tx: &mut Transaction<'_, Sqlite>,
     todo_id: i64,
     tags: &[String],
 ) -> Result<(), StatusCode> {
     for tag_name in tags {
-        let tag_id = sqlx::query_scalar::<_, i64>(
-            "INSERT INTO tags (name) VALUES (?) ON CONFLICT(name) DO UPDATE SET name=name RETURNING id"
+        let tag_id = match sqlx::query_scalar::<_, i64>(
+            "INSERT INTO tags (name) VALUES (?) ON CONFLICT(name) DO UPDATE SET name=name RETURNING id",
         )
         .bind(tag_name)
-        .fetch_one(&mut *tx)
+        .fetch_one(tx.as_mut())
         .await
-        .or_else(|_| {
-            sqlx::query_scalar::<_, i64>("SELECT id FROM tags WHERE name = ?")
-                .bind(tag_name)
-                .fetch_one(&mut *tx)
-        })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        {
+            Ok(id) => id,
+            Err(_) => {
+                sqlx::query_scalar::<_, i64>("SELECT id FROM tags WHERE name = ?")
+                    .bind(tag_name)
+                    .fetch_one(tx.as_mut())
+                    .await
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            }
+        };
 
         sqlx::query("INSERT INTO todo_tags (todo_id, tag_id) VALUES (?, ?)")
             .bind(todo_id)
             .bind(tag_id)
-            .execute(&mut *tx)
+            .execute(tx.as_mut())
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
@@ -187,7 +294,7 @@ async fn replace_tags(
 ) -> Result<(), StatusCode> {
     sqlx::query("DELETE FROM todo_tags WHERE todo_id = ?")
         .bind(todo_id)
-        .execute(&mut *tx)
+        .execute(tx.as_mut())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 

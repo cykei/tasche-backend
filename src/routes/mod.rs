@@ -1,5 +1,5 @@
 use axum::{
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch},
     Router,
 };
 use sqlx::SqlitePool;
@@ -15,6 +15,10 @@ pub fn create_router() -> Router<SqlitePool> {
         .route(
             "/todos/:id",
             patch(todos::update_todo).delete(todos::delete_todo),
+        )
+        .route(
+            "/todos/:id/tags/:tag",
+            delete(todos::delete_todo_tag),
         )
         // Projects
         .route(
