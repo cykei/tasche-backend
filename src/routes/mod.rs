@@ -6,6 +6,7 @@ use sqlx::SqlitePool;
 
 mod events;
 mod projects;
+mod tags;
 mod todos;
 
 pub fn create_router() -> Router<SqlitePool> {
@@ -20,6 +21,7 @@ pub fn create_router() -> Router<SqlitePool> {
             "/todos/:id/tags/:tag",
             delete(todos::delete_todo_tag),
         )
+        .route("/tags", get(tags::list_tags))
         // Projects
         .route(
             "/projects",
