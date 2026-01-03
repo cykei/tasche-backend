@@ -22,6 +22,7 @@ pub fn create_router() -> Router<SqlitePool> {
             delete(todos::delete_todo_tag),
         )
         .route("/tags", get(tags::list_tags))
+        .route("/tags/:name", delete(tags::delete_tag))
         // Projects
         .route(
             "/projects",
